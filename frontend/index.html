@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>M&amp;A Acquirer Identification Engine</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="app-header">
+  <div class="brand">
+    <span class="brand-mark">M&amp;A</span>
+    <div>
+      <h1>Acquirer Identification Engine</h1>
+      <p class="subtitle">Target Profile Builder</p>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="panel" id="dataset-panel">
+    <h2><span class="step-badge">1</span>Dataset</h2>
+    <div id="dataset-status" class="dataset-status">Loading dataset&hellip;</div>
+    <div class="dataset-controls">
+      <label class="file-input">
+        Upload CSV
+        <input type="file" id="csv-file-input" accept=".csv" />
+      </label>
+      <button id="reset-btn" type="button" class="btn-secondary">Use Sample Data</button>
+    </div>
+    <div id="upload-error" class="error-banner hidden"></div>
+  </section>
+
+  <section class="panel" id="form-panel">
+    <h2><span class="step-badge">2</span>Target Profile</h2>
+    <form id="profile-form">
+      <div class="field">
+        <label for="sector">Sector <span class="required">*</span></label>
+        <select id="sector" name="sector" required>
+          <option value="" disabled selected>Select a sector&hellip;</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="deal_size_mm">Deal Size (EV, $mm) <span class="required">*</span></label>
+        <input type="number" id="deal_size_mm" name="deal_size_mm" min="0.1" step="0.1" placeholder="e.g. 200" required />
+        <p class="field-hint" id="deal_size_hint"></p>
+      </div>
+
+      <hr />
+      <p class="optional-note">Optional — narrows the comparison set</p>
+
+      <div class="field">
+        <label for="geography">Geography</label>
+        <select id="geography" name="geography" disabled>
+          <option value="">Not specified</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="target_ownership_pre">Ownership (pre-deal)</label>
+        <select id="target_ownership_pre" name="target_ownership_pre" disabled>
+          <option value="">Not specified</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="target_revenue_band">Target Revenue</label>
+        <select id="target_revenue_band" name="target_revenue_band" disabled>
+          <option value="" disabled selected>Select a sector first&hellip;</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="target_ebitda_band">Target EBITDA</label>
+        <select id="target_ebitda_band" name="target_ebitda_band" disabled>
+          <option value="" disabled selected>Select a sector first&hellip;</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="ebitda_margin_band">EBITDA Margin</label>
+        <select id="ebitda_margin_band" name="ebitda_margin_band" disabled>
+          <option value="" disabled selected>Select a sector first&hellip;</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="revenue_growth_band">Revenue Growth</label>
+        <select id="revenue_growth_band" name="revenue_growth_band" disabled>
+          <option value="" disabled selected>Select a sector first&hellip;</option>
+        </select>
+      </div>
+
+      <div id="submit-error" class="error-banner hidden"></div>
+      <button type="submit" class="btn-primary">Build Target Profile</button>
+    </form>
+  </section>
+
+  <section class="panel hidden" id="result-panel">
+    <h2><span class="step-badge">3</span>Resolved Profile</h2>
+    <div id="result-summary" class="result-summary"></div>
+    <details class="raw-json">
+      <summary>Raw TargetProfile JSON</summary>
+      <pre id="result-json"></pre>
+    </details>
+  </section>
+
+  <section class="panel hidden" id="candidates-panel">
+    <h2><span class="step-badge">4</span>Candidate Acquirers</h2>
+    <div id="candidates-warning" class="warning-banner hidden"></div>
+    <div id="candidates-summary" class="dataset-status"></div>
+    <div class="table-scroll">
+      <table id="candidates-table">
+        <thead>
+          <tr><th>Acquirer</th><th>Type</th><th>Tier</th><th>Primary</th><th>Secondary</th><th>Relevancy</th></tr>
+        </thead>
+        <tbody id="candidates-tbody"></tbody>
+      </table>
+    </div>
+    <details class="raw-json">
+      <summary>Raw candidate_search JSON</summary>
+      <pre id="candidates-json"></pre>
+    </details>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
