@@ -113,7 +113,14 @@
     <div class="table-scroll">
       <table id="candidates-table">
         <thead>
-          <tr><th>Acquirer</th><th>Type</th><th>Tier</th><th>Primary</th><th>Secondary</th><th>Relevancy</th></tr>
+          <tr>
+            <th data-tooltip="The historical acquiring company from the dataset.">Acquirer</th>
+            <th data-tooltip="Strategic = corporate acquirer. Financial Sponsor = private equity firm.">Type</th>
+            <th data-tooltip="Tier 1: a deal in the target's own sector, within ±20% of the target deal size. Tier 2: the most common adjacent sector at that size. Tier 3: the second-most common adjacent sector at ±20%, OR a Tier 1/2 sector at a wider ±40%. Tiers 2/3 are only used if the stronger tier didn't yield enough candidates.">Tier</th>
+            <th data-tooltip="Sector fit + deal size fit, evenly weighted. Deal size is always 100% for a qualifying candidate; sector is 100% (Tier 1), 75% (Tier 2), or 50% (Tier 3) — so Primary is 100% / 87.5% / 75%.">Primary</th>
+            <th data-tooltip="Of this acquirer's qualifying deals, the average % that also match the optional fields you filled in (geography, ownership, revenue, EBITDA, margin, growth). Shows — if you left all optional fields blank.">Secondary</th>
+            <th data-tooltip="Recent closed-deal activity: 100% if more than one closed deal in the past 2 years, 75% (4 yrs), 50% (6 yrs), 25% (8 yrs), otherwise 0%.">Relevancy</th>
+          </tr>
         </thead>
         <tbody id="candidates-tbody"></tbody>
       </table>

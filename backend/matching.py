@@ -2,9 +2,11 @@
 
 Given a resolved TargetProfile, finds candidate acquirers in up to three
 tiers (primary sector, then the two most common adjacent sectors for deals
-of a similar size), then scores each candidate on three independent axes:
-primary (sector + deal size fit), secondary (optional-field fit against the
-acquirer's own qualifying deals), and relevancy (recent closed-deal activity).
+of a similar size — Tier 3 also catches Tier 1/2 sector deals at a wider
+±40% size window, for the room the ±20% band alone missed), then scores each
+candidate on three independent axes: primary (sector + deal size fit),
+secondary (optional-field fit against the acquirer's own qualifying deals),
+and relevancy (recent closed-deal activity).
 
 No ranking or filtering across these three scores is done here — that's left
 to the downstream agentic layer, which has more context to weigh tradeoffs.
@@ -19,6 +21,7 @@ import pandas as pd
 
 MIN_CANDIDATES = 15
 DEAL_SIZE_TOLERANCE = 0.2
+TIER3_WIDE_DEAL_SIZE_TOLERANCE = 0.4  # Tier 3's fallback net on Tier 1/2 sectors
 
 SECTOR_TIER_SCORES = {1: 100, 2: 75, 3: 50}
 RELEVANCY_WINDOWS = [(2, 100), (4, 75), (6, 50), (8, 25)]  # (lookback years, score if >1 closed deal in window)
@@ -38,8 +41,8 @@ def _clean_records(frame: pd.DataFrame) -> list[dict]:
     return records
 
 
-def _deal_size_range(deal_size_mm: float) -> tuple[float, float]:
-    return deal_size_mm * (1 - DEAL_SIZE_TOLERANCE), deal_size_mm * (1 + DEAL_SIZE_TOLERANCE)
+def _deal_size_range(deal_size_mm: float, tolerance: float = DEAL_SIZE_TOLERANCE) -> tuple[float, float]:
+    return deal_size_mm * (1 - tolerance), deal_size_mm * (1 + tolerance)
 
 
 def _rank_other_sectors(df: pd.DataFrame, primary_sector: str, lo: float, hi: float) -> list[tuple[str, int]]:
@@ -73,16 +76,8 @@ def _match_numeric(deal_value, resolved: dict) -> bool:
 
 
 def _match_geography(deal_value, selected: str) -> bool:
-    if selected == "Other":
-        return False
     if selected == "Regional":
         return deal_value not in ("Multi-Regional", "National")
-    return deal_value == selected
-
-
-def _match_categorical(deal_value, selected: str) -> bool:
-    if selected == "Other":
-        return False
     return deal_value == selected
 
 
@@ -118,7 +113,7 @@ def _score_candidate(acquirer: str, entry: dict, optional_resolved: dict) -> dic
         elif field == "geography":
             matches = sum(1 for d in matching_deals if _match_geography(d.get(field), resolved["value"]))
         else:
-            matches = sum(1 for d in matching_deals if _match_categorical(d.get(field), resolved["value"]))
+            matches = sum(1 for d in matching_deals if d.get(field) == resolved["value"])
         field_scores[field] = round(matches / len(matching_deals) * 100, 1) if matching_deals else 0.0
     secondary_score = {
         "field_scores": field_scores,
@@ -139,39 +134,59 @@ def _score_candidate(acquirer: str, entry: dict, optional_resolved: dict) -> dic
     }
 
 
+def _accumulate(pool: dict, subset: pd.DataFrame, tier_num: int, df: pd.DataFrame) -> None:
+    for acquirer, group in subset.groupby("acquirer"):
+        if acquirer not in pool:
+            pool[acquirer] = _new_entry(acquirer, df)
+        entry = pool[acquirer]
+        entry["tier_deal_counts"][tier_num] += len(group)
+        entry["deals_by_tier"][tier_num].extend(_clean_records(group))
+
+
+def _tier3_subset(df: pd.DataFrame, tier3_sector: str | None, wide_sectors: list[str], lo, hi, lo_wide, hi_wide) -> pd.DataFrame:
+    """Tier 3 = its own (2nd-most-common) sector at the normal size window, OR the Tier 1/2
+    sectors at a wider ±40% size window — excluding the ±20% band already claimed by Tier 1/2."""
+    in_narrow = df["deal_size_mm"].between(lo, hi)
+    conditions = []
+    if tier3_sector:
+        conditions.append((df["sector"] == tier3_sector) & in_narrow)
+    if wide_sectors:
+        conditions.append(df["sector"].isin(wide_sectors) & df["deal_size_mm"].between(lo_wide, hi_wide) & ~in_narrow)
+    if not conditions:
+        return df.iloc[0:0]
+    combined = conditions[0]
+    for c in conditions[1:]:
+        combined = combined | c
+    return df[combined]
+
+
 def find_candidates(profile: dict, df: pd.DataFrame) -> dict:
     sector = profile["sector"]
     deal_size = profile["deal_size_mm"]["value"]
     lo, hi = _deal_size_range(deal_size)
+    lo_wide, hi_wide = _deal_size_range(deal_size, TIER3_WIDE_DEAL_SIZE_TOLERANCE)
 
     pool: dict[str, dict] = {}
     tier_sectors: dict[int, str | None] = {1: sector, 2: None, 3: None}
 
-    def add_tier(tier_num: int, sector_name: str | None) -> None:
-        if not sector_name:
-            return
-        subset = df[(df["sector"] == sector_name) & (df["deal_size_mm"] >= lo) & (df["deal_size_mm"] <= hi)]
-        for acquirer, group in subset.groupby("acquirer"):
-            if acquirer not in pool:
-                pool[acquirer] = _new_entry(acquirer, df)
-            entry = pool[acquirer]
-            entry["tier_deal_counts"][tier_num] += len(group)
-            entry["deals_by_tier"][tier_num].extend(_clean_records(group))
-
     # Escalate tier by tier — only fall back to a weaker (adjacent-sector) match
     # when the stronger tier hasn't produced enough candidates on its own.
-    add_tier(1, sector)
+    tier1_subset = df[(df["sector"] == sector) & df["deal_size_mm"].between(lo, hi)]
+    _accumulate(pool, tier1_subset, 1, df)
 
     ranked_other_sectors: list[tuple[str, int]] = []
     if len(pool) < MIN_CANDIDATES:
         ranked_other_sectors = _rank_other_sectors(df, sector, lo, hi)
         if ranked_other_sectors:
             tier_sectors[2] = ranked_other_sectors[0][0]
-            add_tier(2, tier_sectors[2])
+            tier2_subset = df[(df["sector"] == tier_sectors[2]) & df["deal_size_mm"].between(lo, hi)]
+            _accumulate(pool, tier2_subset, 2, df)
 
-    if len(pool) < MIN_CANDIDATES and len(ranked_other_sectors) > 1:
-        tier_sectors[3] = ranked_other_sectors[1][0]
-        add_tier(3, tier_sectors[3])
+    if len(pool) < MIN_CANDIDATES:
+        tier_sectors[3] = ranked_other_sectors[1][0] if len(ranked_other_sectors) > 1 else None
+        wide_sectors = [s for s in (tier_sectors[1], tier_sectors[2]) if s]
+        tier3_subset = _tier3_subset(df, tier_sectors[3], wide_sectors, lo, hi, lo_wide, hi_wide)
+        _accumulate(pool, tier3_subset, 3, df)
 
     optional_resolved = {
         f: profile.get(f) for f in OPTIONAL_NUMERIC_FIELDS + OPTIONAL_CATEGORICAL_FIELDS if profile.get(f)
@@ -183,6 +198,7 @@ def find_candidates(profile: dict, df: pd.DataFrame) -> dict:
     return {
         "target_deal_size_mm": deal_size,
         "deal_size_range_mm": [round(lo, 1), round(hi, 1)],
+        "tier3_wide_deal_size_range_mm": [round(lo_wide, 1), round(hi_wide, 1)],
         "tier_sectors": {f"tier_{t}": s for t, s in tier_sectors.items()},
         "candidate_count": len(candidates),
         "low_match_warning": len(candidates) < MIN_CANDIDATES,

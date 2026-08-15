@@ -53,10 +53,6 @@ function fillCategoricalSelect(id, options, blankLabel) {
     el.textContent = opt;
     select.appendChild(el);
   }
-  const other = document.createElement("option");
-  other.value = "Other";
-  other.textContent = "Other";
-  select.appendChild(other);
 }
 
 function fillBandSelect(id, fieldKey, required) {

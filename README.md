@@ -47,9 +47,10 @@ banker knows the number — the sector's bands still run in the background
 (shown as a range/median hint under the field, e.g. "Healthcare Services deals
 range $20M–$2.5B · median $339M") and the submitted value is placed into its
 sector band server-side for use in matching/precedent analysis later. Every
-other field gets an escape hatch: `"Other"` for categorical fields, `"Lower"` /
-`"Higher"` for banded ones — for when the real target falls outside every
-value the historical data happened to produce. Submitting resolves the
+other banded numeric field gets a `"Lower"` / `"Higher"` escape hatch, for
+when the real target falls outside every value the historical data happened
+to produce; categorical fields (geography, ownership) are a closed choice
+among the values actually observed in the dataset. Submitting resolves the
 selections into a `TargetProfile` object (`POST /api/target-profile`), shown
 on the page as both a readable summary and raw JSON.
 
@@ -61,14 +62,20 @@ the agentic layer, which has more context to weigh tradeoffs.
 - *Candidate search (tiered, escalating):* Tier 1 = acquirers with a deal in
   the target's own sector within ±20% of the target deal size. If that's
   fewer than 15 acquirers, Tier 2 adds acquirers from the sector that's most
-  common among *other*-sector deals in that same size window; if still short,
-  Tier 3 adds the *second*-most-common such sector. Each tier is only computed
-  if the previous one fell short — a sector/size combo with plenty of Tier 1
-  precedent never gets diluted with weaker matches. Below 15 candidates after
-  all three tiers, the search stops anyway (nothing further is defined) and a
-  `low_match_warning` is surfaced in the UI: *"Data has low match rates.
-  Proceeding with analysis."* The bundled sample data's own reference scenario
-  (Healthcare Services, $200M) is a real example of this — it tops out at 13.
+  common among *other*-sector deals in that same size window. If still short,
+  Tier 3 adds acquirers matching *either* of two conditions: a deal in the
+  *second*-most-common such sector at the same ±20%, **or** a deal in the
+  Tier 1 or Tier 2 sector at a wider ±40% window — the room the ±20% band
+  alone missed. That second clause only counts deals *outside* the ±20% band
+  (deals inside it are already Tier 1/2, so nothing is double-counted). Each
+  tier is only computed if the previous one fell short — a sector/size combo
+  with plenty of Tier 1 precedent never gets diluted with weaker matches.
+  Below 15 candidates after all three tiers, the search stops anyway (nothing
+  further is defined) and a `low_match_warning` is surfaced in the UI:
+  *"Data has low match rates. Proceeding with analysis."* The bundled sample
+  data's own reference scenario (Healthcare Services, $200M) used to fall
+  short of 15 with Tier 3 as sector-only; with the wider ±40% fallback it
+  reaches 17.
 - *Primary score:* sector fit × deal size fit, evenly weighted. Deal size is
   100 for every candidate (qualifying requires a size match at every tier);
   sector is 100/75/50 by tier. So primary score is 100/87.5/75 by tier.
@@ -125,11 +132,6 @@ dataset.
     not re-derived per deal's own sector. The band was computed from the
     target's primary sector at form-fill time; that's a fixed cutoff once
     chosen, so it's applied uniformly.
-  - `"Other"` (geography/ownership) matches nothing — every historical deal
-    falls into a known category by construction, so a value the user
-    explicitly flagged as *not* one of those can't be satisfied by any deal.
-    It still counts in the field-average denominator, since the user did fill
-    it in.
   - `"Regional"` for geography matches anything except `"Multi-Regional"` and
     `"National"`, per the explicit spec note.
   - Relevancy is computed from each acquirer's *qualifying* (Tier 1/2/3) deals

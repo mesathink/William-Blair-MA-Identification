@@ -103,8 +103,6 @@ def _resolve_band(field_key: str, sector: str, band_value: str | None, metadata:
 def _resolve_categorical(value: str | None, options: list[str]) -> dict | None:
     if not value:
         return None
-    if value == "Other":
-        return {"value": "Other"}
     if value not in options:
         raise ValueError(f"'{value}' is not a recognized option.")
     return {"value": value}
