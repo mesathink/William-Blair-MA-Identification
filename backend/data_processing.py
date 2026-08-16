@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 
-# --- Expected schema (24 columns) ------------------------------------------------
+# Expected schema (24 columns, based on sample data from William Blari)
 
 STRING_COLUMNS = ["transaction_id", "target_company", "acquirer", "strategic_rationale_tags"]
 CATEGORICAL_COLUMNS = [
@@ -26,8 +27,9 @@ PROFILE_NUMERIC_FIELDS = [
     "deal_size_mm", "target_revenue_mm", "target_ebitda_mm",
     "ebitda_margin_pct", "revenue_growth_pct",
 ]
-MANDATORY_FIELDS = ["sector", "deal_size_mm"]
+MANDATORY_FIELDS = ["sector", "deal_size_mm"] # Make these mandatory for the target profile form to be valid so there is some basis to the profile / search 
 
+# Field units and labels for display in UI
 FIELD_UNITS = {
     "deal_size_mm": "dollar",
     "target_revenue_mm": "dollar",
@@ -50,7 +52,7 @@ class SchemaValidationError(ValueError):
         self.message = message
         self.details = details or []
 
-
+# CSV ingestion and validation functions
 def validate_schema(df: pd.DataFrame) -> None:
     actual = list(df.columns)
     missing = [c for c in EXPECTED_COLUMNS if c not in actual]
@@ -96,13 +98,24 @@ def load_and_validate(source) -> pd.DataFrame:
     return df
 
 
-# --- Percentile banding ------------------------------------------------------------
+def clean_records(frame: pd.DataFrame) -> list[dict]:
+    """DataFrame rows -> JSON-safe dicts: NaN -> None, integer columns -> int (not 2020.0)."""
+    records = frame.replace({np.nan: None}).to_dict("records")
+    for r in records:
+        for col in INTEGER_COLUMNS:
+            if r.get(col) is not None:
+                r[col] = int(r[col])
+    return records
+
+
+# Percentile banding to make dropdowns for numeric fields instead of continuous inputs ... Made this decision for now to keep the comparison simple
+# Later version would do a more robust comparison of the target profile to the dataset with continuous inputs and more scientific scoring system... I've used Gower's distance, knowledge graphs, etc. before which takes a more mathematical approach to similarity matching and layering an agent / LLM pipeline on top of that to provide rationale / explainability
 
 # Quintile cut points -> 5 bands per sector/field, each ~20% of that sector's observations.
 BAND_CUT_FRACTIONS = [0.2, 0.4, 0.6, 0.8]
 BAND_NAMES = ["Low", "Low-Mid", "Mid", "Mid-High", "High"]
 
-
+# Helper function to determine the rounding step for bands
 def _step_for(value: float, unit: str) -> float:
     """The 'clean number' rounding increment for a value's magnitude."""
     magnitude = abs(value)
@@ -126,7 +139,7 @@ def _step_for(value: float, unit: str) -> float:
         return 500
     return 1000
 
-
+# Make sure bands are "clean" numbers that scale with magnitude
 def _round_clean(value: float, unit: str, direction: str = "nearest") -> float:
     """Round to a step that scales with magnitude, e.g. 147.9 -> 150, 622.5 -> 600."""
     step = _step_for(value, unit)
@@ -136,7 +149,7 @@ def _round_clean(value: float, unit: str, direction: str = "nearest") -> float:
         return math.ceil(value / step) * step
     return round(value / step) * step
 
-
+# Bands should be based on percentile values so they are relative to the data / sector selected
 def _percentile(sorted_vals: list[float], p: float) -> float:
     n = len(sorted_vals)
     if n == 1:
@@ -148,16 +161,13 @@ def _percentile(sorted_vals: list[float], p: float) -> float:
         return sorted_vals[f]
     return sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f)
 
-
 def _format_value(value: float, unit: str) -> str:
     if unit == "dollar":
         return f"${value / 1000:.1f}B" if value >= 1000 else f"${value:.0f}M"
     return f"{value:.0f}%"
 
-
 def _band_label(lo: float, hi: float, unit: str) -> str:
     return f"{_format_value(lo, unit)}–{_format_value(hi, unit)}"
-
 
 def _build_field_bands(values: pd.Series, unit: str) -> dict | None:
     vals = sorted(v for v in values.dropna().astype(float).tolist())
@@ -176,7 +186,7 @@ def _build_field_bands(values: pd.Series, unit: str) -> dict | None:
         else:
             edges.append(_round_clean(e, unit, "nearest"))
 
-    # Keep bands strictly increasing even on small or low-variance samples.
+    # Keep bands strictly increasing even on small or low-variance samples
     for i in range(1, len(edges)):
         if edges[i] <= edges[i - 1]:
             edges[i] = edges[i - 1] + _step_for(edges[i - 1], unit)
@@ -203,7 +213,7 @@ def _build_field_bands(values: pd.Series, unit: str) -> dict | None:
         "higher_label": f"Higher (above {_format_value(edges[-1], unit)})",
     }
 
-
+# Parse the dataset and extract relevant metadata
 def parse_dataset(df: pd.DataFrame) -> dict:
     sectors = sorted(df["sector"].dropna().unique().tolist())
     geography_options = sorted(set(df["geography"].dropna().unique().tolist()) | {"Regional"})

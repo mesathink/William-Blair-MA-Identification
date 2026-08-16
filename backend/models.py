@@ -6,7 +6,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-
+# Model for the target profile request after the user has filled out the form... This model is used to validate the request data
 class TargetProfileRequest(BaseModel):
     sector: str
     deal_size_mm: float = Field(gt=0)

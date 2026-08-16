@@ -95,6 +95,7 @@
       <div id="submit-error" class="error-banner hidden"></div>
       <button type="submit" class="btn-primary">Build Target Profile</button>
     </form>
+    <ul id="profile-progress-list" class="progress-list"></ul>
   </section>
 
   <section class="panel hidden" id="result-panel">
@@ -109,6 +110,7 @@
   <section class="panel hidden" id="candidates-panel">
     <h2><span class="step-badge">4</span>Candidate Acquirers</h2>
     <div id="candidates-warning" class="warning-banner hidden"></div>
+    <div id="tier3-justification" class="tier3-banner hidden"></div>
     <div id="candidates-summary" class="dataset-status"></div>
     <div class="table-scroll">
       <table id="candidates-table">
@@ -116,10 +118,11 @@
           <tr>
             <th data-tooltip="The historical acquiring company from the dataset.">Acquirer</th>
             <th data-tooltip="Strategic = corporate acquirer. Financial Sponsor = private equity firm.">Type</th>
-            <th data-tooltip="Tier 1: a deal in the target's own sector, within ±20% of the target deal size. Tier 2: the most common adjacent sector at that size. Tier 3: the second-most common adjacent sector at ±20%, OR a Tier 1/2 sector at a wider ±40%. Tiers 2/3 are only used if the stronger tier didn't yield enough candidates.">Tier</th>
-            <th data-tooltip="Sector fit + deal size fit, evenly weighted. Deal size is always 100% for a qualifying candidate; sector is 100% (Tier 1), 75% (Tier 2), or 50% (Tier 3) — so Primary is 100% / 87.5% / 75%.">Primary</th>
-            <th data-tooltip="Of this acquirer's qualifying deals, the average % that also match the optional fields you filled in (geography, ownership, revenue, EBITDA, margin, growth). Shows — if you left all optional fields blank.">Secondary</th>
-            <th data-tooltip="Recent closed-deal activity: 100% if more than one closed deal in the past 2 years, 75% (4 yrs), 50% (6 yrs), 25% (8 yrs), otherwise 0%.">Relevancy</th>
+            <th data-tooltip="Tier 1: a deal in the target's own sector, within ±20% of the target deal size. Tier 2: the most common adjacent sector at that size. Tier 3: an agent-proposed relaxation (wider deal size, additional sector(s), and/or shared strategic tags) — only used if Tiers 1+2 didn't yield enough candidates. See the banner above the table for the exact plan and why.">Tier</th>
+            <th data-tooltip="Sector fit + deal size fit, evenly weighted, judged off the acquirer's own matching deals. Sector: 100% if any deal was in your target sector, 67% if the first implied sector, 33% if the second implied sector, else 0%. Deal size: 100% if any deal is within ±20% of your target size, 50% if within ±20-40%, else 0%.">Primary Score</th>
+            <th data-tooltip="Average fit, across the optional fields you filled in, judged off the acquirer's own qualifying deals. Geography/Ownership: 100% if their most common (mode) value matches yours, else 0%. Revenue/EBITDA/Margin/Growth: 100% if their median value falls in the same band you selected, 50% if one band above/below, else 0%. Shows — if you left all optional fields blank.">Secondary Score</th>
+            <th data-tooltip="Does the acquirer's own most common (mode) strategic_rationale_tag match one of the target sector's top 3 implied tags? 100% if it's the #1 tag, 67% if #2, 33% if #3, else 0%.">Strategic Match Score</th>
+            <th data-tooltip="Exponential decay on how recently the acquirer's most recent closed deal was: 100 * e^(-0.35 * years since), an ~2-year half-life. 0% if no closed deals.">Relevancy Score</th>
           </tr>
         </thead>
         <tbody id="candidates-tbody"></tbody>

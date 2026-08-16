@@ -1,20 +1,27 @@
 # M&A Acquirer Identification Engine
 
-**Status: Phase 2 — CSV ingestion, Target Profile form, and deterministic
-acquirer matching/scoring.** The agentic layer (LLM-synthesized rationale per
-acquirer — the take-home's core deliverable) is not built yet; this phase
-produces the structured, pre-scored candidate list it will reason over.
+**Status: CSV ingestion, Target Profile form, and deterministic acquirer
+matching/scoring (Tiers 1–2 rule-based, Tier 3 agent-planned relaxation) are
+built end-to-end.** The per-acquirer one-page rationale write-up (LLM-generated
+Overview/Strategic Fit/Precedent/Valuation/Risk Flags/Conviction) from the
+take-home spec is **not yet built**.
 
 ## Run it
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env   # then fill in ANTHROPIC_API_KEY
 python3 run.py
 ```
 
 Opens at `http://127.0.0.1:8000`. The sample dataset (`data/ma_transactions_500.csv`)
-loads automatically on startup — no setup required.
+loads automatically on startup. CSV ingestion, the target profile form, and
+Tier 1/2 acquirer matching all work with **no API key**. `ANTHROPIC_API_KEY`
+is used automatically, inside "Build Target Profile" itself, whenever Tier 1+2
+fall short of 10 candidates and the Tier 3 relaxation agent runs — no key just
+means Tier 3 is skipped gracefully (`low_match_warning` fires, nothing
+errors). `.env` is gitignored; `.env.example` documents every variable.
 
 ## What's here
 
@@ -52,50 +59,94 @@ when the real target falls outside every value the historical data happened
 to produce; categorical fields (geography, ownership) are a closed choice
 among the values actually observed in the dataset. Submitting resolves the
 selections into a `TargetProfile` object (`POST /api/target-profile`), shown
-on the page as both a readable summary and raw JSON.
+on the page as both a readable summary and raw JSON. That endpoint streams
+its progress as Server-Sent Events (e.g. "Finding Tier 1 matches in
+Healthcare Services, $160M–$240M…", "Tier 3: found 12 candidates.") so the UI
+can show what's happening in the backend in real time, rather than a
+plain-JSON response the user just waits on.
 
 **Deterministic acquirer matching** (`backend/matching.py`)
 Given the resolved `TargetProfile`, finds candidate acquirers and scores them
-on three independent axes, without picking a final ranking — that's left to
+on four independent axes, without picking a final ranking — that's left to
 the agentic layer, which has more context to weigh tradeoffs.
 
+- *Inferred values, computed once* — right after the target profile is built,
+  `matching.compute_inferred_values()` derives `likely_sectors` (the sector(s)
+  other than the target's own most common among deals of a similar size,
+  ranked) and `top_strategic_tags` (the most common individual
+  `strategic_rationale_tags` — pipe-delimited, parsed — among the target
+  sector's own deals at this size). These are stored on `profile["inferred_values"]`
+  and referenced everywhere downstream — Tier 2 below, the Tier 3 relaxation
+  agent, and eventually the per-acquirer write-up agent — never recalculated.
 - *Candidate search (tiered, escalating):* Tier 1 = acquirers with a deal in
   the target's own sector within ±20% of the target deal size. If that's
-  fewer than 15 acquirers, Tier 2 adds acquirers from the sector that's most
-  common among *other*-sector deals in that same size window. If still short,
-  Tier 3 adds acquirers matching *either* of two conditions: a deal in the
-  *second*-most-common such sector at the same ±20%, **or** a deal in the
-  Tier 1 or Tier 2 sector at a wider ±40% window — the room the ±20% band
-  alone missed. That second clause only counts deals *outside* the ±20% band
-  (deals inside it are already Tier 1/2, so nothing is double-counted). Each
-  tier is only computed if the previous one fell short — a sector/size combo
-  with plenty of Tier 1 precedent never gets diluted with weaker matches.
-  Below 15 candidates after all three tiers, the search stops anyway (nothing
-  further is defined) and a `low_match_warning` is surfaced in the UI:
-  *"Data has low match rates. Proceeding with analysis."* The bundled sample
-  data's own reference scenario (Healthcare Services, $200M) used to fall
-  short of 15 with Tier 3 as sector-only; with the wider ±40% fallback it
-  reaches 17.
-- *Primary score:* sector fit × deal size fit, evenly weighted. Deal size is
-  100 for every candidate (qualifying requires a size match at every tier);
-  sector is 100/75/50 by tier. So primary score is 100/87.5/75 by tier.
-- *Secondary score:* for each optional field the user filled in, what fraction
-  of the acquirer's own qualifying deals (their Tier 1/2/3 deals) also match
-  that field's value or range — e.g. 4 of 5 matching deals in the selected
-  ownership category is 80%. Averaged evenly across whichever fields were
-  filled in; fields left blank don't count for or against the acquirer, and
-  an acquirer with zero optional fields to check gets `secondary_score: null`
-  rather than a misleading number.
-- *Relevancy score:* recent closed-deal activity, from the same qualifying
-  deal set. More than one closed deal in the past 2 years scores 100; past 4
-  years, 75; past 6, 50; past 8, 25; otherwise 0. A single recent deal doesn't
-  score above 0 here by design — this is a repeat-activity signal, not a
-  last-deal-date signal.
+  fewer than 15 acquirers, Tier 2 adds acquirers from `inferred_values.likely_sectors[0]`
+  (the most common adjacent sector) at the same ±20%. Each tier only runs if
+  the previous one fell short — a sector/size combo with plenty of Tier 1
+  precedent never gets diluted with weaker matches.
+- *Tier 3, agent-planned:* if Tier 1+2 are still short of 15, a single
+  relaxation-planning agent (`tier3_agent.py`) — one call per search, not per
+  acquirer — proposes which sector(s) to widen to, how far to expand the deal
+  size window, and/or whether to also match acquirers by shared strategic
+  tags (using `top_strategic_tags`), each choice justified in plain language
+  tied to the user's input or the inferred values. The agent never touches a
+  row; `matching._run_tier3_relaxation()` executes its plan deterministically
+  and reports back the real resulting candidate count. It gets up to 2 turns —
+  if the first plan falls short, it sees the actual count and can propose
+  something broader — and whichever attempt found more candidates is used.
+  Every optional field the user filled in stays a hard filter throughout,
+  no matter what the agent proposes; it can only relax sector, deal size, and
+  tag matching. Still short of 15 after both turns (or no `ANTHROPIC_API_KEY`
+  configured, in which case Tier 3 is skipped entirely) → `low_match_warning`:
+  *"Data has low match rates. Proceeding with analysis."* Every attempted
+  plan, which one was used, and its justification are returned in
+  `tier3_relaxation` and shown as a banner above the candidates table, and the
+  winning plan is also stored on each Tier 3 candidate individually
+  (`candidate.tier3_relaxation`) for the write-up agent to cite later.
+- *Primary score:* sector fit + deal size fit, evenly weighted, judged off the
+  acquirer's own matching deals (not the tier it was discovered in). Sector:
+  100 if any matching deal was in the target's own sector, 67 if the first
+  implied sector (`inferred_values.likely_sectors[0]`), 33 if the second, else
+  0. Deal size: 100 if any matching deal is within ±20% of the target deal
+  size, 50 if within ±20-40%, else 0.
+- *Secondary score:* for each optional field the user filled in, judged off the
+  acquirer's own qualifying deals (their Tier 1/2/3 deals). Categorical fields
+  (geography, ownership) use the acquirer's mode value — e.g. if 4 of 5
+  matching deals were Southeast, they're treated as a Southeast acquirer: 100
+  if that matches the user's selection, else 0. Numeric fields (revenue,
+  EBITDA, margin, growth) use the acquirer's median value, banded the same way
+  the target profile's sector-relative quintile bands are: 100 if it's the
+  same band the user selected, 50 if one band above/below, else 0. Averaged
+  evenly across whichever fields were filled in and stored per-field
+  (`field_scores`) for the write-up agent to cite later; fields left blank
+  don't count for or against the acquirer, and an acquirer with zero optional
+  fields to check gets `secondary_score: null` rather than a misleading
+  number.
+- *Strategic match score:* does the acquirer's own most common
+  (mode) individual `strategic_rationale_tags` value match one of the target
+  sector's top 3 implied tags (`inferred_values.top_strategic_tags`)? 100 if
+  it's the #1 tag, 67 if #2, 33 if #3, else 0 (including when the acquirer has
+  no tags on record). Same mode-of-the-acquirer's-own-deals pattern as the
+  secondary score's categorical fields, just against the tag field instead of
+  a user-selected field.
+- *Relevancy score:* exponential decay on recency of the acquirer's most
+  recent CLOSED deal, from the same qualifying deal set —
+  `relevancy = 100 * e^(-λ * years_since_most_recent_closed_deal)`, with no
+  closed deals scoring 0. `λ = 0.35` gives an ~2-year half-life
+  (`ln(2)/0.35 ≈ 2.0` years) — a deal's relevancy roughly halves every 2
+  years. `λ` is a **tunable business hyperparameter, not a value fit to the
+  dataset**: M&A strategic appetite shifts meaningfully within a couple of
+  years, so a 2-year half-life is a reasonable default, and it's a one-line
+  change (`RELEVANCY_DECAY_LAMBDA` in `matching.py`) to use a different decay
+  rate. Exponential decay was chosen over hard time buckets (e.g. "100 within
+  2 years, 75 within 4...") because it's smooth — two acquirers whose most
+  recent deal closed 23 and 25 months ago score almost identically, instead of
+  landing on opposite sides of an arbitrary bucket boundary.
 
-Every candidate carries its tier tag, per-tier deal counts, all three scores,
-the specific deals that qualified it, and its full deal history — everything
-the agentic layer needs to write a grounded rationale without re-querying the
-dataset.
+Every candidate carries its tier tag, per-tier deal counts, all four scores,
+the specific deals that qualified it, and its full deal history — including
+the Tier 3 relaxation plan/justification where applicable — so that whatever
+generates the per-acquirer write-up next doesn't need to re-query the dataset.
 
 ## Architecture decisions
 
@@ -138,10 +189,20 @@ dataset.
     only, not their full deal history — kept consistent with how secondary
     scoring also scopes to that same deal set, rather than introducing a
     second, broader pool the spec didn't call for.
-  - Tier 2/3 sector ranking ties break alphabetically, for determinism.
-  - Candidates are pre-sorted (tier asc, then primary score desc, then name)
-    as a sane default for the results table — not a final ranking. The spec
-    explicitly defers ranking/selection to the agentic layer.
+  - Inferred-values sector ranking ties break alphabetically, for determinism.
+  - Candidates are pre-sorted (tier group asc, then primary/secondary/strategic/
+    relevancy score desc, in that order, then name) as a sane default for the
+    results table — not a final ranking. The spec explicitly defers
+    ranking/selection to the agentic layer.
+  - **Tier 3 relaxation agent judgment calls:** across its up-to-2 turns, the
+    attempt with the *higher* resulting candidate count is used, even if that
+    happens to be the first one (turn 2 isn't assumed to always be better,
+    since the agent could in principle propose something narrower). No API
+    key configured degrades to "Tier 3 skipped" rather than blocking the
+    whole search — the base app (CSV, form, Tier 1/2) has always worked
+    without a key, and that stays true here. An empty/unusable plan (agent
+    returns no sectors and no tag matching) just produces zero additional
+    candidates rather than erroring, so a bad turn can't crash the search.
 
 ## Known limitations
 
@@ -156,14 +217,7 @@ dataset.
   drift as time passes even for an identical target profile and dataset —
   inherent to any recency-based score, not a bug, but worth knowing if two
   runs on different days produce different relevancy numbers.
-- The candidates table in the UI is a verification view of the raw scoring
-  output, not the final banker-facing deliverable — no acquirer detail view,
-  no sorting/filtering, no export yet. That's intentionally deferred; the
-  next phase's one-pagers are the real UI for this data.
+- The candidates table (step 4) is currently the final output of the app —
+  it's a verification view of the raw deterministic scoring, not yet the
+  one-page-per-acquirer banker deliverable the spec asks for (see Status above).
 
-## Next
-
-The agentic layer: an LLM reasons over each candidate's tier, scores, and
-attached deals to write the one-page rationale (overview, strategic fit
-thesis, precedent activity, valuation context, risk flags, conviction level)
-per the take-home spec — not yet implemented.
