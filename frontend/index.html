@@ -132,6 +132,22 @@
       <summary>Raw candidate_search JSON</summary>
       <pre id="candidates-json"></pre>
     </details>
+    <button id="generate-reports-btn" type="button" class="btn-primary">Generate Reports (top 10)</button>
+    <div id="reports-error" class="error-banner hidden"></div>
+  </section>
+
+  <section class="panel hidden" id="reports-panel">
+    <h2><span class="step-badge">5</span>Acquirer Rationales</h2>
+    <ul id="reports-progress-list" class="progress-list"></ul>
+    <div id="reports-summary" class="dataset-status"></div>
+    <div id="reports-dropped"></div>
+    <div id="reports-carousel" class="reports-carousel hidden">
+      <button id="reports-prev" type="button" class="carousel-arrow" aria-label="Previous report">&#8249;</button>
+      <div id="reports-cards"></div>
+      <button id="reports-next" type="button" class="carousel-arrow" aria-label="Next report">&#8250;</button>
+    </div>
+    <div id="reports-position" class="reports-position"></div>
+    <a id="download-reports-btn" class="btn-secondary hidden" href="/api/reports/download" download>Download Word Doc</a>
   </section>
 </main>
 

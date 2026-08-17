@@ -1,9 +1,7 @@
 """Pydantic models for the target profile API."""
 
 from __future__ import annotations
-
 from typing import Optional
-
 from pydantic import BaseModel, Field
 
 # Model for the target profile request after the user has filled out the form... This model is used to validate the request data

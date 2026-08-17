@@ -1,7 +1,5 @@
 """
-Deterministic acquirer candidate identification + scoring.
-
-Given a resolved TargetProfile, finds candidate acquirers in up to three
+Given a resolved TargetProfile (user inputs), finds candidate acquirers in up to three
 tiers. Tier 1 is the target's own sector; Tier 2 is the single most common
 adjacent sector at the same deal size — both driven off the profile's
 `inferred_values` (computed once, see compute_inferred_values below), not
@@ -15,40 +13,41 @@ acquirer's own qualifying deals), strategic (modal strategic-tag match against
 the target sector's top implied tags), and relevancy (recent closed-deal
 activity).
 
-No ranking or filtering across these scores is done here — that's left
-to the downstream agentic layer, which has more context to weigh tradeoffs.
+The outputs and intermediate results of this scoring / data analysis is also saved for the
+report agent to use in its rationale generation. These numbers are stored in a JSON 
+to later be passed. 
 """
 
 from __future__ import annotations
-
 import math
 import statistics
 from collections import Counter
 from datetime import date
-
 import pandas as pd
 import tier3_agent
 from data_processing import BAND_NAMES, clean_records
 
-# Constasnts for candidate identification and scoring
+
+############## CONSTANTS FOR SCORING ###############
+
 MIN_CANDIDATES = 10
 DEAL_SIZE_TOLERANCE = 0.2
 TIER3_WIDE_DEAL_SIZE_TOLERANCE = 0.4  # Tier 3's default deal-size tolerance if the relaxation agent doesn't specify one
 
-SECTOR_MATCH_SCORES = (100, 67, 33)  # target sector / first implied sector / second implied sector
-DEAL_MATCH_SCORES = (100, 50, 0)  # exact match (aka 20% band) / within wide range (aka 40% band) / no match
-STRATEGIC_TAG_MATCH_SCORES = (100, 67, 33)  # acquirer's modal tag == 1st / 2nd / 3rd most common target-sector tag
-# Exponential decay rate for relevancy scoring -- a tunable business assumption, not a value fit to the
-# dataset. lambda=0.35 gives a ~2-year half-life (ln(2)/0.35 ≈ 2.0 years). See README for the full rationale.
-RELEVANCY_DECAY_LAMBDA = 0.35
+SECTOR_MATCH_SCORES = (100, 67, 33)  # Target sector / first implied sector / second implied sector
+DEAL_MATCH_SCORES = (100, 50, 0)  # Exact match (aka 20% band) / within wide range (aka 40% band) / no match
+STRATEGIC_TAG_MATCH_SCORES = (100, 67, 33)  # Acquirer's 1st / 2nd / 3rd most common target-sector tag
+RELEVANCY_DECAY_LAMBDA = 0.35 # Used for relevancy score (exponential decay on years since most recent closed deal, this value roughly gives half life of 2 years)
 QUARTER_START_MONTH = {"Q1": 1, "Q2": 4, "Q3": 7, "Q4": 10}
 
 OPTIONAL_NUMERIC_FIELDS = ["target_revenue_mm", "target_ebitda_mm", "ebitda_margin_pct", "revenue_growth_pct"]
 OPTIONAL_CATEGORICAL_FIELDS = ["geography", "target_ownership_pre"]
 
-# Ordered band keys (the edge bands + the 5 sector-relative quintiles), used to measure how many bands
-# an acquirer's typical value sits from the target's selected band -- mirrors data_processing.py's BAND_NAMES
+# Ordered band keys (the edge bands + the 5 sector-relative quintiles), used to measure how many bands an acquirer's typical value sits from the target's band
 ORDERED_BAND_KEYS = ["lower"] + [n.lower().replace("-", "_") for n in BAND_NAMES] + ["higher"]
+
+
+############## HELPER FUNCTIONS FOR RANKING ###############
 
 # Sets the range of deal sizes to consider for a given target deal size... Tolerance is set to +/- 20% right now, but I need to really validate if this is the right range froma business perspective  
 # I also thought about using a log scale or percentile-based approach since having a fixed value can be limiting and something I'm usually uncomfortable with, but keeping it simple for the 3-4 effort window
@@ -125,33 +124,23 @@ def _apply_hard_optional_filters(subset: pd.DataFrame, profile: dict) -> pd.Data
         subset = subset[subset["target_ownership_pre"] == own["value"]]
     return subset
 
-# Convert a deal's year/quarter into a date object for relevancy scoring
-def _deal_date(row: dict) -> date | None:
-    year, quarter = row.get("deal_year"), row.get("deal_quarter")
-    if year is None or quarter not in QUARTER_START_MONTH:
-        return None
-    return date(int(year), QUARTER_START_MONTH[quarter], 1)
 
-# Relevancy = exponential decay on time since the acquirer's most recent CLOSED deal (rather than hard time
-# buckets), so relevancy declines smoothly instead of falling off a cliff at an arbitrary year boundary.
-def _relevancy_score(deals: list[dict]) -> dict:
-    closed_dates = [d for d in (_deal_date(r) for r in deals if r.get("outcome") == "Closed") if d]
-    if not closed_dates:
-        return {"score": 0.0, "years_since_most_recent_closed_deal": None}
-    years_since = (date.today() - max(closed_dates)).days / 365.25
-    score = round(100 * math.exp(-RELEVANCY_DECAY_LAMBDA * years_since), 1)
-    return {"score": score, "years_since_most_recent_closed_deal": round(years_since, 2)}
+############## SCORING FUNCTIONS ###############
 
-# Primary score = average of sector match and deal size match, judged off the acquirer's own matching deals
-# (not the tier it was found in) -- an acquirer only gets credit for the sector/size it actually transacted at
+# Primary score = average of sector match and deal size match, judged off the acquirer's own matching deals (not the tier it was found in) -- an acquirer only gets credit for the sector/size it actually transacted at
+# Compute categorical labels for the same branch that sets the numeric score ... Computed once for downstream use in agent for report generation 
 def _primary_score(matching_deals: list[dict], target_sector: str, likely_sectors: list[str], deal_size_mm: float) -> dict:
     deal_sectors = {d.get("sector") for d in matching_deals}
+    matched_sector, sector_fit = None, "none"
     if target_sector in deal_sectors:
         sector_score = SECTOR_MATCH_SCORES[0]
+        matched_sector, sector_fit = target_sector, "exact_target"
     elif len(likely_sectors) > 0 and likely_sectors[0] in deal_sectors:
         sector_score = SECTOR_MATCH_SCORES[1]
+        matched_sector, sector_fit = likely_sectors[0], "adjacent_1"
     elif len(likely_sectors) > 1 and likely_sectors[1] in deal_sectors:
         sector_score = SECTOR_MATCH_SCORES[2]
+        matched_sector, sector_fit = likely_sectors[1], "adjacent_2"
     else:
         sector_score = 0
 
@@ -159,13 +148,16 @@ def _primary_score(matching_deals: list[dict], target_sector: str, likely_sector
     lo_wide, hi_wide = _deal_size_range(deal_size_mm, TIER3_WIDE_DEAL_SIZE_TOLERANCE)
     deal_sizes = [d["deal_size_mm"] for d in matching_deals if d.get("deal_size_mm") is not None]
     if any(lo <= v <= hi for v in deal_sizes):
-        deal_size_score = DEAL_MATCH_SCORES[0]
+        deal_size_score, deal_size_fit = DEAL_MATCH_SCORES[0], "within_range"
     elif any(lo_wide <= v <= hi_wide for v in deal_sizes):
-        deal_size_score = DEAL_MATCH_SCORES[1]
+        deal_size_score, deal_size_fit = DEAL_MATCH_SCORES[1], "wider_range"
     else:
-        deal_size_score = DEAL_MATCH_SCORES[2]
+        deal_size_score, deal_size_fit = DEAL_MATCH_SCORES[2], "outside_range"
 
-    return {"sector_score": sector_score, "deal_size_score": deal_size_score, "score": (sector_score + deal_size_score) / 2}
+    return {
+        "sector_score": sector_score, "deal_size_score": deal_size_score, "score": (sector_score + deal_size_score) / 2,
+        "matched_sector": matched_sector, "sector_fit": sector_fit, "deal_size_fit": deal_size_fit,
+    }
 
 # Most common non-null value among a set of deals for a field (ties broken alphabetically, for determinism)
 def _mode(values: list) -> str | None:
@@ -185,37 +177,41 @@ def _band_index(value: float, edges: list[float]) -> int:
             return i + 1
     return len(ORDERED_BAND_KEYS) - 2  # unreachable: edges span [edges[0], edges[-1]]
 
-# Secondary score = average, across the optional fields the user filled in, of how well the acquirer's own
-# qualifying deals fit that field. Categorical fields (geography, ownership) use the acquirer's mode value --
-# 100 if it matches the user's selection, else 0. Numeric fields use the acquirer's median value, banded the
-# same way the target profile's bands are -- 100 if it's the same band the user selected, 50 if one band
-# above/below, else 0. Stored per-field (not just averaged) so the write-up agent can cite specifics later.
+# Secondary score = average, across the optional fields the user filled in, of how well the acquirer's own qualifying deals fit that field
+# Categorical fields (geography, ownership) use the acquirer's mode value where 100 if it matches the user's selection, else 0
+# Numeric fields use the acquirer's median value, where 100 if it's the same band the user selected, 50 if one band above/below, else 0
 def _secondary_score(matching_deals: list[dict], optional_resolved: dict) -> dict:
     field_scores = {}
     for field, resolved in optional_resolved.items():
         if field in OPTIONAL_NUMERIC_FIELDS:
             values = [d[field] for d in matching_deals if d.get(field) is not None]
             if not values:
-                field_scores[field] = 0.0
+                field_scores[field] = {"score": 0.0, "acquirer_value": None, "fit": "no_data"}
                 continue
-            acquirer_band = _band_index(statistics.median(values), resolved["band_edges"])
+            acquirer_value = statistics.median(values)
+            acquirer_band = _band_index(acquirer_value, resolved["band_edges"])
             target_band = ORDERED_BAND_KEYS.index(resolved["band"])
             diff = abs(acquirer_band - target_band)
-            field_scores[field] = 100.0 if diff == 0 else 50.0 if diff == 1 else 0.0
+            score = 100.0 if diff == 0 else 50.0 if diff == 1 else 0.0
+            fit = "match" if diff == 0 else "adjacent" if diff == 1 else "no_match"
+            field_scores[field] = {"score": score, "acquirer_value": round(acquirer_value, 1), "fit": fit}
         elif field == "geography":
             mode_value = _mode([d.get(field) for d in matching_deals])
-            field_scores[field] = 100.0 if mode_value is not None and _match_geography(mode_value, resolved["value"]) else 0.0
+            matched = mode_value is not None and _match_geography(mode_value, resolved["value"])
+            fit = "no_data" if mode_value is None else "match" if matched else "no_match"
+            field_scores[field] = {"score": 100.0 if matched else 0.0, "acquirer_value": mode_value, "fit": fit}
         else:
             mode_value = _mode([d.get(field) for d in matching_deals])
-            field_scores[field] = 100.0 if mode_value == resolved["value"] else 0.0
+            matched = mode_value == resolved["value"]
+            fit = "no_data" if mode_value is None else "match" if matched else "no_match"
+            field_scores[field] = {"score": 100.0 if matched else 0.0, "acquirer_value": mode_value, "fit": fit}
 
     return {
         "field_scores": field_scores,
-        "score": round(sum(field_scores.values()) / len(field_scores), 1) if field_scores else None,
+        "score": round(sum(fs["score"] for fs in field_scores.values()) / len(field_scores), 1) if field_scores else None,
     }
 
-# Most common individual strategic_rationale_tag (pipe-delimited, so split first) across a set of deals --
-# the acquirer's "modal" tag, ties broken alphabetically for determinism
+# Most common individual strategic_rationale_tag
 def _strategic_tag_mode(deals: list[dict]) -> str | None:
     counter: Counter = Counter()
     for d in deals:
@@ -226,17 +222,32 @@ def _strategic_tag_mode(deals: list[dict]) -> str | None:
         return None
     return sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
 
-# Strategic match score: does the acquirer's own modal strategic tag match one of the target sector's top 3
-# implied tags (inferred_values.top_strategic_tags)? 100 if 1st, 67 if 2nd, 33 if 3rd, else 0.
+# Strategic match score where 100 if 1st, 67 if 2nd, 33 if 3rd, else 0
 def _strategic_match_score(matching_deals: list[dict], top_strategic_tags: list[str]) -> dict:
     mode_tag = _strategic_tag_mode(matching_deals)
-    score = 0
+    score, rank = 0, None
     if mode_tag is not None:
-        for rank, tag in enumerate(top_strategic_tags[:3]):
+        for i, tag in enumerate(top_strategic_tags[:3]):
             if mode_tag == tag:
-                score = STRATEGIC_TAG_MATCH_SCORES[rank]
+                score, rank = STRATEGIC_TAG_MATCH_SCORES[i], i + 1
                 break
-    return {"mode_tag": mode_tag, "score": score}
+    return {"mode_tag": mode_tag, "score": score, "rank": rank}
+
+# Convert a deal's year/quarter into a date object for relevancy scoring
+def _deal_date(row: dict) -> date | None:
+    year, quarter = row.get("deal_year"), row.get("deal_quarter")
+    if year is None or quarter not in QUARTER_START_MONTH:
+        return None
+    return date(int(year), QUARTER_START_MONTH[quarter], 1)
+
+# Relevancy = exponential decay on time since the acquirer's most recent CLOSED deal, so relevancy declines smoothly instead of falling off a cliff at an arbitrary year boundary
+def _relevancy_score(deals: list[dict]) -> dict:
+    closed_dates = [d for d in (_deal_date(r) for r in deals if r.get("outcome") == "Closed") if d]
+    if not closed_dates:
+        return {"score": 0.0, "years_since_most_recent_closed_deal": None}
+    years_since = (date.today() - max(closed_dates)).days / 365.25
+    score = round(100 * math.exp(-RELEVANCY_DECAY_LAMBDA * years_since), 1)
+    return {"score": score, "years_since_most_recent_closed_deal": round(years_since, 2)}
 
 # Score a candidate acquirer based on its best tier, the number of matching deals, and the optional fields provided in the target profile
 def _score_candidate(
@@ -276,9 +287,12 @@ def _accumulate(pool: dict, subset: pd.DataFrame, tier_num: int, df: pd.DataFram
         entry["tier_deal_counts"][tier_num] += len(group)
         entry["deals_by_tier"][tier_num].extend(clean_records(group))
 
+
+############## TIER 1-3 MATCHING FUNCTIONS ###############
 # Tier 3: Relaxation-planning agent proposes a plan -- which sector(s) to widen to, how far to expand the deal size window, and/or whether to match on shared strategic tags
 async def _run_tier3_relaxation(profile: dict, df: pd.DataFrame, pool: dict, lo: float, hi: float) -> dict:
     def execute_plan(plan: dict) -> tuple[pd.DataFrame, int]:
+        # Set bands for deal size 
         tolerance = plan.get("deal_size_tolerance_pct") or TIER3_WIDE_DEAL_SIZE_TOLERANCE
         lo_wide, hi_wide = _deal_size_range(profile["deal_size_mm"]["value"], tolerance)
         in_narrow = df["deal_size_mm"].between(lo, hi)
@@ -287,9 +301,9 @@ async def _run_tier3_relaxation(profile: dict, df: pd.DataFrame, pool: dict, lo:
         conditions = []
         sectors = [s for s in (plan.get("sectors") or []) if s]
         if sectors:
-            conditions.append(df["sector"].isin(sectors) & size_mask)
+            conditions.append(df["sector"].isin(sectors) & size_mask) # Use conditions from agent 
         if plan.get("use_tag_matching"):
-            top_tags = set(profile["inferred_values"]["top_strategic_tags"])
+            top_tags = set(profile["inferred_values"]["top_strategic_tags"]) # Use strategic tags from agent 
             if top_tags:
                 tag_mask = df["strategic_rationale_tags"].fillna("").apply(
                     lambda tags: bool(top_tags & {t.strip() for t in tags.split("|")})
@@ -297,7 +311,7 @@ async def _run_tier3_relaxation(profile: dict, df: pd.DataFrame, pool: dict, lo:
                 conditions.append(tag_mask & size_mask)
 
         if not conditions:
-            subset = df.iloc[0:0]
+            subset = df.iloc[0:0] 
         else:
             combined = conditions[0]
             for c in conditions[1:]:
@@ -306,8 +320,11 @@ async def _run_tier3_relaxation(profile: dict, df: pd.DataFrame, pool: dict, lo:
 
         subset = _apply_hard_optional_filters(subset, profile)
         total = len(set(pool.keys()) | set(subset["acquirer"].unique()))
-        return subset, total
 
+        # Return results to agent for it to evaluate what to do next (max 2 turns) 
+        return subset, total 
+
+    # Calls to agent 
     result = await tier3_agent.plan_and_execute_tier3(profile, len(pool), MIN_CANDIDATES, execute_plan)
     used_plan, used_subset = result.get("used_plan"), result.pop("used_subset", None)
     if used_plan is not None and used_subset is not None and not used_subset.empty:
@@ -317,9 +334,6 @@ async def _run_tier3_relaxation(profile: dict, df: pd.DataFrame, pool: dict, lo:
     return result  
 
 # Main function to find candidate acquirers based on the target profile and the deals df
-# async because Tier 3 may invoke the relaxation-planning agent, which is an LLM call.
-# on_event, if given, is called with a small progress dict at each tier boundary -- lets the API layer
-# stream "what's happening" to the UI without this function knowing anything about SSE/HTTP.
 async def find_candidates(profile: dict, df: pd.DataFrame, on_event=None) -> dict:
     def emit(event: dict) -> None:
         if on_event:
@@ -391,7 +405,7 @@ async def find_candidates(profile: dict, df: pd.DataFrame, on_event=None) -> dic
         "deal_size_range_mm": [round(lo, 1), round(hi, 1)],
         "tier_sectors": {f"tier_{t}": s for t, s in tier_sectors.items()},
         # None if Tier 3 was never triggered (Tier 1 + 2 already had enough)
-        # Tier 3 rationale surfaced in the UI so banker can see exactly what was widened and stored per-candidate for the write-up agent later.
+        # Tier 3 rationale surfaced in the UI so banker can see exactly what was widened and stored per-candidate for the write-up agent later
         "tier3_relaxation": tier3_relaxation,
         "candidate_count": len(candidates),
         "low_match_warning": len(candidates) < MIN_CANDIDATES,

@@ -16,9 +16,47 @@ const SECONDARY_FIELD_LABELS = {
   target_ownership_pre: "Ownership (pre-deal)",
 };
 
+// Plain-English notes for matching.py's own categorical fit labels (sector_fit/deal_size_fit/rank),
+// rather than re-deriving them here from the numeric score
+const SECTOR_FIT_NOTES = {
+  exact_target: (s) => `target sector: ${s.matched_sector}`,
+  adjacent_1: (s) => `1st implied sector: ${s.matched_sector}`,
+  adjacent_2: (s) => `2nd implied sector: ${s.matched_sector}`,
+  none: () => "no sector match",
+};
+const DEAL_SIZE_FIT_NOTES = {
+  within_range: "within ±20% of target size",
+  wider_range: "within ±20-40% of target size",
+  outside_range: "outside ±40% of target size",
+};
+const STRATEGIC_RANK_NOTES = {
+  1: "the sector's #1 implied tag",
+  2: "the sector's #2 implied tag",
+  3: "the sector's #3 implied tag",
+};
+
 let metadata = null;
+let lastSubmittedPayload = null;
 
 const $ = (id) => document.getElementById(id);
+
+// Reads a fetch Response's SSE body, calling onEvent(event) for each `data: {...}` chunk as it arrives
+async function readSSEStream(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const chunks = buffer.split("\n\n");
+    buffer = chunks.pop(); // last chunk may be incomplete, keep it for next read
+    for (const chunk of chunks) {
+      if (!chunk.startsWith("data: ")) continue;
+      onEvent(JSON.parse(chunk.slice(6)));
+    }
+  }
+}
 
 async function fetchMetadata() {
   const res = await fetch("/api/metadata");
@@ -114,10 +152,9 @@ function renderResult(profile) {
   const rows = [];
   rows.push(["Sector", profile.sector]);
   rows.push(["Deal Size (EV, $mm)", formatDollar(profile.deal_size_mm.value)]);
-  for (const [key, select] of Object.entries(FIELD_TO_BAND_SELECT)) {
-    const label = document.querySelector(`label[for="${select}"]`).textContent.replace(" *", "");
+  for (const key of Object.keys(FIELD_TO_BAND_SELECT)) {
     const val = profile[key];
-    rows.push([label, val ? val.label : "Not specified"]);
+    rows.push([SECONDARY_FIELD_LABELS[key], val ? val.label : "Not specified"]);
   }
   rows.push(["Geography", profile.geography ? profile.geography.value : "Not specified"]);
   rows.push(["Ownership (pre-deal)", profile.target_ownership_pre ? profile.target_ownership_pre.value : "Not specified"]);
@@ -190,20 +227,18 @@ function renderTier3Justification(tr) {
 // Plain-language breakdown of where each score is coming from, shown on hover in the matches table
 function primaryBreakdown(c) {
   const s = c.primary_score;
-  const sectorNote =
-    s.sector_score === 100 ? "target sector" :
-    s.sector_score === 67 ? "1st implied sector" :
-    s.sector_score === 33 ? "2nd implied sector" : "no sector match";
-  const sizeNote =
-    s.deal_size_score === 100 ? "within ±20% of target size" :
-    s.deal_size_score === 50 ? "within ±20-40% of target size" : "outside ±40% of target size";
+  const sectorNote = SECTOR_FIT_NOTES[s.sector_fit](s);
+  const sizeNote = DEAL_SIZE_FIT_NOTES[s.deal_size_fit];
   return `Sector: ${s.sector_score}% (${sectorNote})\nDeal size: ${s.deal_size_score}% (${sizeNote})\nAverage: ${s.score}%`;
 }
 
 function secondaryBreakdown(c) {
   const s = c.secondary_score;
   if (s.score === null) return null;
-  const lines = Object.entries(s.field_scores).map(([field, score]) => `${SECONDARY_FIELD_LABELS[field] || field}: ${score}%`);
+  const lines = Object.entries(s.field_scores).map(([field, fs]) => {
+    const value = fs.acquirer_value === null ? "no data" : fs.acquirer_value;
+    return `${SECONDARY_FIELD_LABELS[field] || field}: ${fs.score}% (their typical: ${value})`;
+  });
   lines.push(`Average: ${s.score}%`);
   return lines.join("\n");
 }
@@ -217,10 +252,7 @@ function relevancyBreakdown(c) {
 function strategicBreakdown(c) {
   const s = c.strategic_score;
   if (s.mode_tag === null) return "No strategic_rationale_tags on record — 0%.";
-  const rankNote =
-    s.score === 100 ? "the sector's #1 implied tag" :
-    s.score === 67 ? "the sector's #2 implied tag" :
-    s.score === 33 ? "the sector's #3 implied tag" : "not among the sector's top 3 implied tags";
+  const rankNote = STRATEGIC_RANK_NOTES[s.rank] || "not among the sector's top 3 implied tags";
   return `Acquirer's most common tag: "${s.mode_tag}"\n${rankNote} → ${s.score}%`;
 }
 
@@ -311,8 +343,15 @@ function resetForm() {
   $("profile-form").reset();
   $("result-panel").classList.add("hidden");
   $("candidates-panel").classList.add("hidden");
+  $("reports-panel").classList.add("hidden");
   $("deal_size_hint").innerHTML = "";
   resetProfileProgress();
+  resetReportsProgress();
+  currentReports = [];
+  currentReportIndex = 0;
+  renderCurrentReportCard();
+  $("download-reports-btn").classList.add("hidden");
+  lastSubmittedPayload = null;
   for (const id of ["target_revenue_band", "target_ebitda_band", "ebitda_margin_band", "revenue_growth_band"]) {
     $(id).innerHTML = '<option value="" disabled selected>Select a sector first…</option>';
     $(id).disabled = true;
@@ -407,32 +446,267 @@ async function onSubmit(e) {
       return;
     }
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const chunks = buffer.split("\n\n");
-      buffer = chunks.pop(); // last chunk may be incomplete, keep it for next read
-      for (const chunk of chunks) {
-        if (!chunk.startsWith("data: ")) continue;
-        const event = JSON.parse(chunk.slice(6));
-        if (event.type === "done") {
-          renderResult(event.target_profile);
-          renderCandidates(event.candidate_search);
-        } else if (event.type === "error") {
-          $("submit-error").textContent = event.message;
-          $("submit-error").classList.remove("hidden");
-        } else {
-          handleProfileProgressEvent(event);
-        }
+    await readSSEStream(res, (event) => {
+      if (event.type === "done") {
+        lastSubmittedPayload = payload;
+        $("reports-panel").classList.add("hidden");
+        renderResult(event.target_profile);
+        renderCandidates(event.candidate_search);
+      } else if (event.type === "error") {
+        $("submit-error").textContent = event.message;
+        $("submit-error").classList.remove("hidden");
+      } else {
+        handleProfileProgressEvent(event);
       }
-    }
+    });
   } catch (err) {
     $("submit-error").textContent = `Request failed: ${err}`;
     $("submit-error").classList.remove("hidden");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// --- Live progress for "Generate Reports" (Server-Sent Events) -------------------
+
+let reportProgressRows = {}; // acquirer -> <li> element, for the current run
+
+function resetReportsProgress() {
+  $("reports-progress-list").innerHTML = "";
+  reportProgressRows = {};
+}
+
+function reportProgressRow(acquirer) {
+  if (reportProgressRows[acquirer]) return reportProgressRows[acquirer];
+  const li = document.createElement("li");
+  li.className = "progress-row queued";
+  const dot = document.createElement("span");
+  dot.className = "progress-dot";
+  const name = document.createElement("span");
+  name.className = "progress-acquirer";
+  name.textContent = acquirer;
+  const detail = document.createElement("span");
+  detail.className = "progress-detail";
+  li.appendChild(dot);
+  li.appendChild(name);
+  li.appendChild(detail);
+  $("reports-progress-list").appendChild(li);
+  reportProgressRows[acquirer] = li;
+  return li;
+}
+
+function setReportProgress(acquirer, status, detailText) {
+  const row = reportProgressRow(acquirer);
+  row.className = `progress-row ${status}`;
+  row.querySelector(".progress-detail").textContent = detailText;
+}
+
+function handleReportProgressEvent(event) {
+  switch (event.type) {
+    case "report_batch_started":
+      for (const acquirer of event.acquirers) setReportProgress(acquirer, "queued", "queued");
+      break;
+    case "report_started":
+      setReportProgress(event.acquirer, "running", "starting…");
+      break;
+    case "report_tool_called":
+      setReportProgress(event.acquirer, "running", `calling ${event.tool}…`);
+      break;
+    case "report_retry":
+      setReportProgress(event.acquirer, "retrying", "submission failed validation, retrying…");
+      break;
+    case "report_succeeded":
+      setReportProgress(event.acquirer, "succeeded", "done");
+      break;
+    case "report_failed":
+      setReportProgress(event.acquirer, "failed", `failed: ${event.reason}`);
+      break;
+  }
+}
+
+// --- Rendering the finished report run --------------------------------------------
+
+function conviction(text) {
+  const span = document.createElement("span");
+  span.className = `conviction-badge conviction-${text}`;
+  span.textContent = text;
+  return span;
+}
+
+function reportSection(title, bodyText) {
+  const section = document.createElement("div");
+  section.className = "rationale-section";
+  const h4 = document.createElement("h4");
+  h4.textContent = title;
+  const p = document.createElement("p");
+  p.textContent = bodyText;
+  section.appendChild(h4);
+  section.appendChild(p);
+  return section;
+}
+
+function renderReportCard(entry) {
+  const r = entry.report;
+  const card = document.createElement("div");
+  card.className = "rationale-card";
+
+  const header = document.createElement("div");
+  header.className = "rationale-card-header";
+  const h3 = document.createElement("h3");
+  h3.textContent = entry.acquirer;
+  const tierPill = document.createElement("span");
+  tierPill.className = "tier-pill";
+  tierPill.textContent = `Tier ${entry.tier}`;
+  header.appendChild(h3);
+  header.appendChild(tierPill);
+  header.appendChild(conviction(r.conviction_level));
+  card.appendChild(header);
+
+  card.appendChild(reportSection("Acquirer Overview", r.acquirer_overview));
+  card.appendChild(reportSection("Strategic Fit Thesis", r.strategic_fit_thesis));
+  card.appendChild(reportSection("Precedent Activity", r.precedent_activity));
+  card.appendChild(reportSection("Valuation Context", r.valuation_context));
+
+  const riskSection = document.createElement("div");
+  riskSection.className = "rationale-section";
+  const riskH4 = document.createElement("h4");
+  riskH4.textContent = "Risk Flags";
+  const ul = document.createElement("ul");
+  for (const flag of r.risk_flags) {
+    const li = document.createElement("li");
+    li.textContent = flag;
+    ul.appendChild(li);
+  }
+  riskSection.appendChild(riskH4);
+  riskSection.appendChild(ul);
+  card.appendChild(riskSection);
+
+  card.appendChild(reportSection("Conviction Rationale", r.conviction_rationale));
+
+  const meta = document.createElement("div");
+  meta.className = "rationale-meta";
+  meta.textContent =
+    `Primary ${entry.primary_score}% · Secondary ${entry.secondary_score ?? "—"}% · Strategic ${entry.strategic_score}% · ` +
+    `Relevancy ${entry.relevancy_score}% · ${entry.token_usage.input_tokens + entry.token_usage.output_tokens} tokens`;
+  card.appendChild(meta);
+
+  const details = document.createElement("details");
+  details.className = "raw-json";
+  const summary = document.createElement("summary");
+  summary.textContent = "Reasoning + raw JSON";
+  const pre = document.createElement("pre");
+  pre.textContent = JSON.stringify(entry, null, 2);
+  details.appendChild(summary);
+  details.appendChild(pre);
+  card.appendChild(details);
+
+  return card;
+}
+
+function renderDroppedCard(entry) {
+  const card = document.createElement("div");
+  card.className = "dropped-card";
+  const header = document.createElement("div");
+  header.className = "dropped-card-header";
+  const strong = document.createElement("strong");
+  strong.textContent = entry.acquirer;
+  const reason = document.createElement("span");
+  reason.className = "dropped-reason";
+  reason.textContent = entry.reason;
+  header.appendChild(strong);
+  header.appendChild(reason);
+  card.appendChild(header);
+  return card;
+}
+
+// Carousel state for the delivered report cards -- one card shown at a time, arrows flip between them
+let currentReports = [];
+let currentReportIndex = 0;
+
+function renderCurrentReportCard() {
+  const cardsContainer = $("reports-cards");
+  cardsContainer.innerHTML = "";
+
+  if (!currentReports.length) {
+    $("reports-carousel").classList.add("hidden");
+    $("reports-position").textContent = "";
+    return;
+  }
+
+  cardsContainer.appendChild(renderReportCard(currentReports[currentReportIndex]));
+  $("reports-carousel").classList.remove("hidden");
+  $("reports-position").textContent = `${currentReportIndex + 1} of ${currentReports.length}`;
+  $("reports-prev").disabled = currentReportIndex === 0;
+  $("reports-next").disabled = currentReportIndex === currentReports.length - 1;
+}
+
+function showReportOffset(delta) {
+  const next = currentReportIndex + delta;
+  if (next < 0 || next >= currentReports.length) return;
+  currentReportIndex = next;
+  renderCurrentReportCard();
+}
+
+function renderReportRun(data) {
+  const run = data.report_run;
+  $("reports-summary").textContent =
+    `${run.delivered_count} of ${run.requested_count} rationales generated in ${run.elapsed_seconds}s — ` +
+    `${run.token_usage.total_tokens} tokens (${run.token_usage.input_tokens} in / ${run.token_usage.output_tokens} out)` +
+    (run.dropped.length ? ` — ${run.dropped.length} acquirer(s) failed.` : ".");
+
+  const droppedContainer = $("reports-dropped");
+  droppedContainer.innerHTML = "";
+  for (const entry of run.dropped) droppedContainer.appendChild(renderDroppedCard(entry));
+
+  currentReports = run.delivered;
+  currentReportIndex = 0;
+  renderCurrentReportCard();
+
+  $("download-reports-btn").classList.toggle("hidden", run.delivered.length === 0);
+  $("reports-panel").classList.remove("hidden");
+}
+
+async function onGenerateReports() {
+  if (!lastSubmittedPayload) return;
+  const btn = $("generate-reports-btn");
+  $("reports-error").classList.add("hidden");
+  $("reports-summary").textContent = "";
+  $("reports-dropped").innerHTML = "";
+  currentReports = [];
+  currentReportIndex = 0;
+  renderCurrentReportCard();
+  resetReportsProgress();
+  $("download-reports-btn").classList.add("hidden");
+  btn.disabled = true;
+  $("reports-panel").classList.remove("hidden");
+  $("reports-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+
+  try {
+    const res = await fetch("/api/reports", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(lastSubmittedPayload),
+    });
+    if (!res.ok) {
+      const body = await res.json();
+      $("reports-error").textContent = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      $("reports-error").classList.remove("hidden");
+      return;
+    }
+
+    await readSSEStream(res, (event) => {
+      if (event.type === "done") {
+        renderReportRun(event);
+      } else if (event.type === "error") {
+        $("reports-error").textContent = event.message;
+        $("reports-error").classList.remove("hidden");
+      } else {
+        handleReportProgressEvent(event);
+      }
+    });
+  } catch (err) {
+    $("reports-error").textContent = `Request failed: ${err}`;
+    $("reports-error").classList.remove("hidden");
   } finally {
     btn.disabled = false;
   }
@@ -442,5 +716,8 @@ $("sector").addEventListener("change", onSectorChange);
 $("csv-file-input").addEventListener("change", onUpload);
 $("reset-btn").addEventListener("click", onResetToSample);
 $("profile-form").addEventListener("submit", onSubmit);
+$("generate-reports-btn").addEventListener("click", onGenerateReports);
+$("reports-prev").addEventListener("click", () => showReportOffset(-1));
+$("reports-next").addEventListener("click", () => showReportOffset(1));
 
 fetchMetadata();

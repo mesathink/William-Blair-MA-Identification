@@ -15,10 +15,8 @@ raising -- Tier 3 just doesn't widen further, matching.py's own low_match_warnin
 """
 
 from __future__ import annotations
-
 import os
 from typing import Callable
-
 import anthropic
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")

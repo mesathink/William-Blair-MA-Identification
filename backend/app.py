@@ -1,14 +1,16 @@
 """FastAPI backend: CSV ingestion + target profile API, serving the static frontend."""
 
 from __future__ import annotations
-
 import asyncio
 import io
 import json
+import os
 from pathlib import Path
-
+from typing import Awaitable, Callable
 import data_processing as dp
+import docx_export
 import matching
+import report_agent
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -27,7 +29,7 @@ load_dotenv(ROOT_DIR / ".env")
 # Set up FastAPI app and global state for the dataset and metadata
 app = FastAPI(title="M&A Acquirer Identification Engine")
 
-STATE: dict = {"df": None, "metadata": None, "source": None}
+STATE: dict = {"df": None, "metadata": None, "source": None, "last_report_run": None}
 
 
 def _set_dataset(df, source: str) -> dict:
@@ -136,6 +138,33 @@ def build_target_profile(payload: TargetProfileRequest, metadata: dict) -> dict:
 def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, default=str)}\n\n"
 
+# Runs `work(on_event)` as a background task, streaming whatever it emits via on_event() as SSE
+# events, finishing with a 'done' event carrying work's return value, or an 'error' event if it
+# raises. `work` keeps running server-side (asyncio.create_task) even if the client disconnects.
+def _stream_sse(work: Callable[[Callable[[dict], None]], Awaitable[dict]]) -> StreamingResponse:
+    async def event_stream():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_event(event: dict) -> None:
+            queue.put_nowait(event)
+
+        async def run_job():
+            try:
+                done_payload = await work(on_event)
+                await queue.put({"type": "done", **done_payload})
+            except Exception as e:
+                await queue.put({"type": "error", "message": str(e)})
+
+        job = asyncio.create_task(run_job())
+        while True:
+            event = await queue.get()
+            yield _sse(event)
+            if event["type"] in ("done", "error"):
+                break
+        await job
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
 # Endpoint to submit a target profile and get matching candidates. Validates the dataset is loaded, builds the
 # target profile, then streams live Tier 1/2/3 progress (SSE) so the UI can show what's happening in the backend,
 # finishing with a 'done' event carrying the same {target_profile, candidate_search} shape a plain response used to.
@@ -154,28 +183,59 @@ async def submit_target_profile(payload: TargetProfileRequest):
     profile["inferred_values"] = matching.compute_inferred_values(profile["sector"], profile["deal_size_mm"]["value"], STATE["df"])
     df = STATE["df"]
 
-    async def event_stream():
-        queue: asyncio.Queue = asyncio.Queue()
+    async def work(on_event):
+        candidate_search = await matching.find_candidates(profile, df, on_event=on_event)
+        return {"target_profile": profile, "candidate_search": candidate_search}
 
-        def on_event(event: dict) -> None:
-            queue.put_nowait(event)
+    return _stream_sse(work)
 
-        async def run_job():
-            try:
-                candidate_search = await matching.find_candidates(profile, df, on_event=on_event)
-                await queue.put({"type": "done", "target_profile": profile, "candidate_search": candidate_search})
-            except Exception as e:
-                await queue.put({"type": "error", "message": str(e)})
+# Endpoint to generate the top-10 LLM rationales. Rebuilds the profile + candidates the same way
+# /api/target-profile does (cheap, deterministic), then streams report_agent's live progress as
+# SSE. The finished batch is also stashed in STATE so /api/reports/latest can serve it even if
+# this connection drops -- run_job() below keeps running server-side regardless of the client.
+@app.post("/api/reports")
+async def generate_reports(payload: TargetProfileRequest):
+    if STATE["metadata"] is None:
+        raise HTTPException(503, "Dataset not loaded.")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(503, "ANTHROPIC_API_KEY is not set. Add it to .env and restart the server.")
+    try:
+        profile = build_target_profile(payload, STATE["metadata"])
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    profile["inferred_values"] = matching.compute_inferred_values(profile["sector"], profile["deal_size_mm"]["value"], STATE["df"])
+    df = STATE["df"]
+    candidate_search = await matching.find_candidates(profile, df)
 
-        job = asyncio.create_task(run_job())
-        while True:
-            event = await queue.get()
-            yield _sse(event)
-            if event["type"] in ("done", "error"):
-                break
-        await job
+    async def work(on_event):
+        report_run = await report_agent.generate_reports(profile, candidate_search["candidates"], on_event=on_event)
+        STATE["last_report_run"] = {"target_profile": profile, "candidate_search": candidate_search, "report_run": report_run}
+        return {"target_profile": profile, "candidate_search": candidate_search, "report_run": report_run}
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return _stream_sse(work)
+
+# Retrieves the most recently completed report batch, so results survive a dropped SSE connection
+# or a page reload without recomputing/re-spending tokens. Returns 404 if none has completed yet.
+@app.get("/api/reports/latest")
+def get_latest_report_run():
+    if STATE["last_report_run"] is None:
+        raise HTTPException(404, "No completed report run yet.")
+    return STATE["last_report_run"]
+
+# Downloads the most recently completed report batch as a formatted Word doc (one page per acquirer).
+# Builds straight off STATE["last_report_run"] -- no regeneration, no new tokens spent. 404 if none yet.
+@app.get("/api/reports/download")
+def download_report_docx():
+    run = STATE["last_report_run"]
+    if run is None:
+        raise HTTPException(404, "No completed report run yet.")
+    buffer = docx_export.build_report_docx(run["target_profile"], run["report_run"])
+    filename = f"MA_acquirer_rationales.docx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

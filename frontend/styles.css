@@ -322,6 +322,91 @@ tbody td:not(:first-child) { font-family: "SF Mono", "Menlo", monospace; color: 
   font-family: inherit;
 }
 
+#generate-reports-btn { margin-top: 16px; }
+#download-reports-btn {
+  display: inline-block;
+  margin-top: 14px;
+  text-decoration: none;
+  text-align: center;
+}
+
+.reports-carousel {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+.reports-carousel #reports-cards { flex: 1; min-width: 0; }
+.reports-carousel .rationale-card { margin-bottom: 0; }
+.carousel-arrow {
+  flex-shrink: 0;
+  align-self: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: border-color 0.15s, background 0.15s;
+}
+.carousel-arrow:hover:not(:disabled) { border-color: var(--accent); background: rgba(255, 255, 255, 0.05); }
+.carousel-arrow:disabled { opacity: 0.3; cursor: not-allowed; }
+.reports-position { text-align: center; font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+
+.rationale-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+  background: #101116;
+}
+.rationale-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.rationale-card-header h3 { margin: 0; font-size: 16px; color: var(--text); }
+.conviction-badge {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.conviction-High { background: rgba(53, 208, 192, 0.15); color: var(--accent-2); }
+.conviction-Medium { background: rgba(212, 160, 23, 0.15); color: #e0b23d; }
+.conviction-Low { background: rgba(255, 107, 122, 0.15); color: var(--error); }
+.rationale-section { margin-bottom: 12px; }
+.rationale-section h4 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.rationale-section p { margin: 0; font-size: 14px; line-height: 1.5; }
+.rationale-section ul { margin: 4px 0 0; padding-left: 18px; font-size: 14px; line-height: 1.5; }
+.rationale-meta { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
+
+.dropped-card {
+  border: 1px solid var(--error-border);
+  background: var(--error-bg);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+.dropped-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.dropped-card-header strong { color: var(--text); font-size: 14px; }
+.dropped-reason { color: var(--error); font-family: "SF Mono", "Menlo", monospace; font-size: 12px; }
+
 .progress-list {
   list-style: none;
   margin: 0 0 16px;
@@ -352,6 +437,7 @@ tbody td:not(:first-child) { font-family: "SF Mono", "Menlo", monospace; color: 
 .progress-row.succeeded .progress-dot { background: var(--accent-2); }
 .progress-row.failed .progress-dot { background: var(--error); }
 .progress-row.retrying .progress-dot { background: #e0b23d; }
+.progress-acquirer { font-weight: 600; color: var(--text); min-width: 160px; }
 .progress-detail { color: var(--text-muted); font-family: "SF Mono", "Menlo", monospace; font-size: 12px; }
 @keyframes pulse {
   0%, 100% { opacity: 1; }

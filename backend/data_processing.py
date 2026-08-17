@@ -1,9 +1,7 @@
 """CSV ingestion: schema validation, categorical parsing, and sector-based numeric banding."""
 
 from __future__ import annotations
-
 import math
-
 import numpy as np
 import pandas as pd
 
