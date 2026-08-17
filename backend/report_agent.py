@@ -98,6 +98,10 @@ are internal labels, not banker-facing language; translate them into a normal se
 instead. Cite match_signals' actual values, plus the real numbers in matching_deals/
 transaction history (deal sizes, multiples, dates, tag names), instead.
 
+NEVER mention "Tier 1/2/3," "tier," or how this acquirer was found in your prose --
+that's internal search methodology, not a reason for the banker. Explain fit using
+the actual numbers you are provided and the transaction history instead. 
+
 Weight match_signals in the order they're given -- sector_fit and deal_size_fit matter most,
 then optional_criteria_fit, then strategic_tag_rank, then recency -- and be nuanced: e.g. if
 sector/deal-size fit is strong but recency is weak, still write a rationale grounded
@@ -106,6 +110,11 @@ signal drag down an otherwise strong case. Similarly, if given multiple medium s
 1-2 weak signals, let this build a case for moving the conviction level down. 
 Essentially, be nuanced in your analysis and take all factors into consideration. Build an
 arguement, don't just make isolated claims.  
+
+Similar to tiers, NEVER mention "match_signals", "strategic_tag_rank", "sector_fit", or anything with an undersore in
+the report itself. Remember, this is going to be submitted straight to an MD. Instead, use plain English to
+describe your reasoning, such as "the strategic tags have high match between ..." or "this acquirer
+transacts in the same sector as the target profile". 
 
 Before calling submit_rationale, use its internal_reasoning field to briefly think through
 whether this acquirer is genuinely a strong fit or a weak one and why. This is logged for
@@ -162,10 +171,8 @@ def _build_context(profile: dict, candidate: dict) -> dict:
         "inferred_values": profile["inferred_values"],
         "acquirer": candidate["acquirer"],
         "acquirer_type": candidate["acquirer_type"],
-        "tier": candidate["tier"],
-        "tier_deal_counts": candidate["tier_deal_counts"],
         "match_signals": _match_signals(candidate, optional_criteria),
-        "tier3_relaxation": candidate.get("tier3_relaxation"),
+        "search_relaxation": candidate.get("tier3_relaxation"),
         "matching_deals": _format_deals(candidate["matching_deals"]),
     }
 
