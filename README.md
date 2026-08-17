@@ -26,16 +26,9 @@ You don't need an API key to upload a CSV, fill out the target profile form, or 
 Tier 1/2 matches. The key is used in two places: automatically inside "Build Target
 Profile" if Tier 1 and 2 come up short and the Tier 3 relaxation agent kicks in (no
 key just means Tier 3 is skipped and the app tells the user it found fewer candidates than
-usual), and in "Generate Reports," which creates the final output. To use this part of
-<<<<<<< HEAD
-the app, just create a copy of te .env.example file, name it ".env", and fill with your
-Claude API key.
-
----
-=======
-the app, just create a copy of the .env.example file, name it ".env", and fill with your 
+usual), and in "Generate Reports," which creates the final output. To use this part of the app, 
+just create a copy of the .env.example file in this repository, name it ".env", and fill with your
 Claude API key. 
->>>>>>> 19ff0cef5e1ac038d0346eb3ab724840dbaca06b
 
 ## How it works
 
